@@ -1,0 +1,386 @@
+# ============================================================================
+# AIS Go 应用完整配置示例
+# ============================================================================
+# 说明:
+#   - 支持环境变量占位符: ${VAR} 或 ${VAR:-default}
+#   - 支持环境变量覆盖: AIS_HTTP_PORT=8080
+#   - 所有配置项均为可选，未配置时使用默认值
+# ============================================================================
+
+# ============================================================================
+# HTTP 服务器配置
+# ============================================================================
+http:
+  # 监听端口
+  port: ${HTTP_PORT:-8080}
+  
+  # 监听地址（留空表示监听所有网卡）
+  host: ${HTTP_HOST:-}
+  
+  # 应用名称
+  app_name: "AIS Go Application"
+  
+  # 超时配置
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 120s
+  health_check_timeout: 2s
+  
+  # 是否启用 Panic 恢复中间件（生产环境推荐 true）
+  enable_recover: true
+  
+  # CORS 跨域资源共享配置
+  cors:
+    # 是否启用 CORS
+    enabled: true
+    
+    # 允许的源列表（生产环境必须明确指定）
+    # 开发环境可使用 ["*"]，生产环境禁止使用通配符
+    allow_origins:
+      - "https://example.com"
+      - "https://www.example.com"
+      - "https://admin.example.com"
+    
+    # 允许的 HTTP 方法
+    allow_methods:
+      - "GET"
+      - "POST"
+      - "PUT"
+      - "DELETE"
+      - "PATCH"
+      - "OPTIONS"
+    
+    # 允许的请求头
+    allow_headers:
+      - "Origin"
+      - "Content-Type"
+      - "Accept"
+      - "Authorization"
+      - "X-Request-ID"
+      - "X-Tenant-ID"
+    
+    # 是否允许携带凭证（Cookie、Authorization）
+    # 注意: 设为 true 时，allow_origins 不能使用通配符 "*"
+    allow_credentials: true
+    
+    # 允许客户端访问的响应头
+    expose_headers:
+      - "X-Total-Count"
+      - "X-Page-Number"
+      - "X-Page-Size"
+    
+    # 预检请求缓存时间（秒）
+    max_age: 3600
+    
+    # 是否允许私有网络请求
+    allow_private_network: false
+  
+  # 监听配置
+  listen:
+    # 是否启用 Prefork 模式（多进程）
+    enable_prefork: false
+    
+    # 是否禁用启动消息
+    disable_startup_message: false
+    
+    # 是否打印所有路由
+    enable_print_routes: false
+    
+    # 监听网络类型: tcp, tcp4, tcp6, unix
+    listener_network: "tcp4"
+    
+    # TLS 配置（启用 HTTPS）
+    cert_file: ""
+    cert_key_file: ""
+    cert_client_file: ""
+    
+    # 优雅关闭超时
+    shutdown_timeout: 10s
+    
+    # Unix Socket 文件权限
+    unix_socket_file_mode: 0770
+    
+    # TLS 最低版本: 771 (TLS 1.2), 772 (TLS 1.3)
+    tls_min_version: 771
+
+# ============================================================================
+# 数据库配置（PostgreSQL）
+# ============================================================================
+database:
+  # 数据库类型: postgres, mysql
+  driver: "postgres"
+  
+  # 连接信息
+  host: ${DB_HOST:-localhost}
+  port: ${DB_PORT:-5432}
+  user: ${DB_USER:-postgres}
+  password: ${DB_PASSWORD:-postgres}
+  dbname: ${DB_NAME:-ais}
+  
+  # SSL 模式: disable, require, verify-ca, verify-full
+  sslmode: "disable"
+  
+  # 时区
+  timezone: "Asia/Shanghai"
+  
+  # 连接池配置
+  max_open_conns: 100
+  max_idle_conns: 10
+  conn_max_lifetime: 1h
+  conn_max_idle_time: 10m
+  
+  # 慢查询日志阈值
+  slow_threshold: 200ms
+  
+  # 日志级别: silent, error, warn, info
+  log_level: "warn"
+  
+  # 是否启用彩色日志
+  colorful: true
+  
+  # 是否忽略记录未找到错误
+  ignore_record_not_found_error: true
+  
+  # 是否自动迁移
+  auto_migrate: false
+
+# ============================================================================
+# Redis 缓存配置
+# ============================================================================
+redis:
+  host: ${REDIS_HOST:-localhost}
+  port: ${REDIS_PORT:-6379}
+  password: ${REDIS_PASSWORD:-}
+  db: ${REDIS_DB:-0}
+  pool_size: 10
+  min_idle_conns: 5
+
+# ============================================================================
+# 日志配置
+# ============================================================================
+logger:
+  # 日志级别: debug, info, warn, error, dpanic, panic, fatal
+  level: ${LOG_LEVEL:-info}
+  
+  # 日志格式: json, console
+  format: "json"
+  
+  # 是否启用开发模式（console 格式 + 彩色输出）
+  development: false
+  
+  # 是否禁用调用者信息（文件名、行号）
+  disable_caller: false
+  
+  # 是否禁用堆栈跟踪
+  disable_stacktrace: false
+  
+  # 日志输出路径
+  output_paths:
+    - "stdout"
+    - "/var/log/ais/app.log"
+  
+  # 错误日志输出路径
+  error_output_paths:
+    - "stderr"
+    - "/var/log/ais/error.log"
+  
+  # 初始字段（所有日志都会包含）
+  initial_fields:
+    app: "ais-go"
+    env: "${ENV:-production}"
+
+# ============================================================================
+# Metrics 指标配置
+# ============================================================================
+metrics:
+  # 是否启用 Prometheus 指标
+  enabled: true
+  
+  # 指标端点路径
+  path: "/metrics"
+  
+  # 应用名称（用于指标标签）
+  app_name: "ais_go_app"
+  
+  # 命名空间（指标前缀）
+  namespace: "ais"
+  
+  # 子系统名称
+  subsystem: "http"
+
+# ============================================================================
+# 消息队列配置
+# ============================================================================
+mq:
+  # MQ 类型: rocketmq, kafka
+  type: "rocketmq"
+  
+  # RocketMQ 配置
+  rocketmq:
+    name_servers:
+      - "${ROCKETMQ_NAMESERVER:-127.0.0.1:9876}"
+    namespace: ""
+    instance_name: "DEFAULT"
+    access_key: ""
+    secret_key: ""
+    
+    # 生产者配置
+    producer:
+      group_name: "ais_producer_group"
+      send_msg_timeout: 3s
+      retry_times_on_failed: 2
+      max_message_size: 4194304  # 4MB
+      compress_level: 5
+    
+    # 消费者配置
+    consumer:
+      group_name: "ais_consumer_group"
+      model: "Clustering"  # Clustering / Broadcasting
+      consume_from_where: "LastOffset"  # FirstOffset / LastOffset / Timestamp
+      consume_message_batch_max: 1
+      pull_batch_size: 32
+      pull_interval: 0
+      max_reconsume_times: 16
+  
+  # Kafka 配置
+  kafka:
+    brokers:
+      - "${KAFKA_BROKER:-127.0.0.1:9092}"
+    version: "2.8.0"
+    
+    # SASL 认证
+    sasl:
+      enable: false
+      mechanism: "PLAIN"  # PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512
+      username: ""
+      password: ""
+    
+    # TLS 配置
+    tls:
+      enable: false
+      cert_file: ""
+      key_file: ""
+      ca_file: ""
+      insecure: false
+    
+    # 生产者配置
+    producer:
+      required_acks: "leader"  # none / leader / all
+      timeout: 10s
+      max_message_bytes: 1048576  # 1MB
+      compression: "none"  # none / gzip / snappy / lz4 / zstd
+      idempotent: false
+      retry_max: 3
+    
+    # 消费者配置
+    consumer:
+      group_id: "ais_consumer_group"
+      initial_offset: "newest"  # newest / oldest
+      auto_commit: false
+      auto_commit_interval: 1s
+      session_timeout: 10s
+      heartbeat_interval: 3s
+      max_wait_time: 250ms
+      max_processing_time: 100ms
+      fetch_min: 1
+      fetch_max: 10485760
+      fetch_default: 1048576
+
+# ============================================================================
+# 中间件配置
+# ============================================================================
+middleware:
+  # API Key 认证
+  apikey:
+    enabled: false
+    keys:
+      - "your-api-key-1"
+      - "your-api-key-2"
+    header_name: "X-API-Key"
+  
+  # 限流配置
+  ratelimit:
+    enabled: true
+    max_requests: 100
+    window: 1m
+    storage: "memory"  # memory / redis
+
+# ============================================================================
+# 优雅关闭配置
+# ============================================================================
+shutdown:
+  # 优雅关闭超时时间
+  timeout: 30s
+  
+  # 是否等待所有请求完成
+  wait_for_requests: true
+
+# ============================================================================
+# 多租户配置
+# ============================================================================
+tenant:
+  # 是否启用多租户
+  enabled: true
+  
+  # 租户 ID 来源: header, context, jwt
+  source: "header"
+  
+  # 租户 ID 请求头名称
+  header_name: "X-Tenant-ID"
+  
+  # 是否启用租户隔离（自动添加 tenant_id 过滤）
+  isolation_enabled: true
+  
+  # 是否启用部门数据权限
+  dept_security_enabled: false
+
+# ============================================================================
+# 验证器配置
+# ============================================================================
+validator:
+  # 是否启用自定义验证器
+  enabled: true
+  
+  # 验证失败时的错误消息语言: en, zh
+  locale: "zh"
+
+# ============================================================================
+# 业务配置示例
+# ============================================================================
+app:
+  # 应用名称
+  name: "AIS Go Application"
+  
+  # 应用版本
+  version: "1.0.0"
+  
+  # 运行环境: development, staging, production
+  env: "${ENV:-production}"
+  
+  # JWT 配置
+  jwt:
+    secret: "${JWT_SECRET:-your-secret-key}"
+    expire: 24h
+    issuer: "ais-go"
+  
+  # 文件上传配置
+  upload:
+    max_size: 10485760  # 10MB
+    allowed_types:
+      - "image/jpeg"
+      - "image/png"
+      - "image/gif"
+      - "application/pdf"
+    storage_path: "/var/ais/uploads"
+  
+  # 分页配置
+  pagination:
+    default_page_size: 20
+    max_page_size: 100
+  
+  # 业务特定配置
+  business:
+    enable_email_notification: true
+    enable_sms_notification: false
+    max_retry_times: 3
+    cache_ttl: 300s

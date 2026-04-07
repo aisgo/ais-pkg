@@ -1,0 +1,439 @@
+package repository
+
+import (
+	"context"
+	"fmt"
+	"reflect"
+	"sync"
+
+	"github.com/aisgo/ais-pkg/errors"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"gorm.io/gorm/schema"
+)
+
+/* ========================================================================
+ * CRUD Repository Implementation - CRUD 操作实现
+ * ========================================================================
+ * 职责: 实现 CRUDRepository 接口
+ *
+ * 使用示例:
+ *   // 1. 定义模型
+ *   type User struct {
+ *       repository.BaseModel
+ *       Name  string `gorm:"column:name;type:varchar(100);not null"`
+ *       Email string `gorm:"column:email;type:varchar(255);uniqueIndex"`
+ *   }
+ *
+ *   // 2. 创建仓储
+ *   repo := repository.NewRepository[User](db)
+ *
+ *   // 3. 基本 CRUD
+ *   user := &User{Name: "Alice", Email: "alice@example.com"}
+ *   err := repo.Create(ctx, user)
+ *
+ *   // 4. 查询
+ *   foundUser, err := repo.FindByID(ctx, user.ID.String())
+ *
+ *   // 5. 更新
+ *   user.Name = "Alice Updated"
+ *   err = repo.Update(ctx, user)
+ *
+ *   // 6. 部分更新（防止批量赋值漏洞）
+ *   err = repo.UpdateByID(ctx, user.ID.String(),
+ *       map[string]any{"name": "New Name"},
+ *       "name", "email") // 白名单字段
+ *
+ *   // 7. 删除（软删除）
+ *   err = repo.Delete(ctx, user.ID.String())
+ *
+ *   // 8. 事务示例
+ *   err = repo.Execute(ctx, func(txCtx context.Context) error {
+ *       user1 := &User{Name: "User1"}
+ *       if err := repo.Create(txCtx, user1); err != nil {
+ *           return err
+ *       }
+ *
+ *       user2 := &User{Name: "User2"}
+ *       if err := repo.Create(txCtx, user2); err != nil {
+ *           return err // 自动回滚
+ *       }
+ *
+ *       return nil // 自动提交
+ *   })
+ *
+ *   // 9. 分页查询
+ *   page, err := repo.Paginate(ctx, repository.PageRequest{
+ *       Page:     1,
+ *       PageSize: 10,
+ *   }, repository.WithCondition("age > ?", 18))
+ * ======================================================================== */
+
+const (
+	// DefaultBatchSize 默认批量操作大小
+	DefaultBatchSize = 100
+)
+
+// RepositoryImpl 仓储实现
+type RepositoryImpl[T any] struct {
+	db *gorm.DB
+
+	// Schema 缓存（线程安全）
+	schemaOnce sync.Once
+	schema     *schema.Schema
+	schemaErr  error
+
+	// Tenant field 缓存（线程安全）
+	tenantFieldsOnce sync.Once
+	cachedTenantFld  *schema.Field
+	cachedDeptFld    *schema.Field
+	cachedTenantErr  error
+
+	// strictUpdates 严格模式：当 UpdateByID 收到 allowedFields 白名单之外的字段时返回错误而非静默跳过
+	strictUpdates bool
+}
+
+// NewRepository 创建新的仓储实例
+func NewRepository[T any](db *gorm.DB) Repository[T] {
+	return &RepositoryImpl[T]{db: db}
+}
+
+// SetStrictUpdates 开启或关闭严格更新模式。
+// 开启时，UpdateByID 若收到不在 allowedFields 白名单中的字段，将返回错误而非静默跳过。
+func (r *RepositoryImpl[T]) SetStrictUpdates(strict bool) {
+	r.strictUpdates = strict
+}
+
+// GetDB 获取底层 GORM DB 实例
+func (r *RepositoryImpl[T]) GetDB() *gorm.DB {
+	return r.db
+}
+
+// newModelPtr 创建新的模型指针
+func (r *RepositoryImpl[T]) newModelPtr() *T {
+	var model T
+	return &model
+}
+
+// withContext 返回带 context 的 DB (自动识别事务)
+func (r *RepositoryImpl[T]) withContext(ctx context.Context) *gorm.DB {
+	return getDBFromContext(ctx, r.db)
+}
+
+// getSchema 获取缓存的 Schema（线程安全）
+func (r *RepositoryImpl[T]) getSchema() (*schema.Schema, error) {
+	r.schemaOnce.Do(func() {
+		stmt := &gorm.Statement{DB: r.db}
+		r.schemaErr = stmt.Parse(r.newModelPtr())
+		if r.schemaErr == nil {
+			r.schema = stmt.Schema
+		}
+	})
+	return r.schema, r.schemaErr
+}
+
+/* ========================================================================
+ * Create 操作
+ * ======================================================================== */
+
+// Create 创建单条记录
+func (r *RepositoryImpl[T]) Create(ctx context.Context, model *T) error {
+	if model == nil {
+		return errors.ErrInvalidArgument
+	}
+
+	if err := r.setTenantFields(ctx, model); err != nil {
+		return err
+	}
+
+	return normalizeRepositoryError(r.withContext(ctx).Create(model).Error, "failed to create record")
+}
+
+// CreateBatch 批量创建记录
+func (r *RepositoryImpl[T]) CreateBatch(ctx context.Context, models []*T, batchSize int) error {
+	if len(models) == 0 {
+		return errors.ErrInvalidArgument
+	}
+
+	if batchSize <= 0 {
+		batchSize = DefaultBatchSize
+	}
+
+	// 过滤 nil 模型
+	validModels := make([]*T, 0, len(models))
+	for _, m := range models {
+		if m != nil {
+			validModels = append(validModels, m)
+		}
+	}
+
+	if len(validModels) == 0 {
+		return nil
+	}
+
+	for _, m := range validModels {
+		if err := r.setTenantFields(ctx, m); err != nil {
+			return err
+		}
+	}
+
+	return normalizeRepositoryError(r.withContext(ctx).CreateInBatches(validModels, batchSize).Error, "failed to create records")
+}
+
+/* ========================================================================
+ * Update 操作
+ * ======================================================================== */
+
+// Update 更新记录（根据主键）
+// 注意：使用 Updates 语义，默认忽略结构体中的零值字段；
+// 若需要显式写入零值，请改用 UpdateByID 传 map，或自行调用 GORM Save。
+func (r *RepositoryImpl[T]) Update(ctx context.Context, model *T) error {
+	if model == nil {
+		return errors.ErrInvalidArgument
+	}
+
+	if err := r.ensurePrimaryKeySet(ctx, model); err != nil {
+		return err
+	}
+
+	db := r.applyTenantScope(ctx, r.withContext(ctx))
+	result := db.Model(model).Updates(model)
+	if result.Error != nil {
+		return normalizeRepositoryError(result.Error, "failed to update record")
+	}
+
+	if result.RowsAffected == 0 {
+		return normalizeRepositoryError(gorm.ErrRecordNotFound, "record not found")
+	}
+
+	return nil
+}
+
+// UpdateByID 根据 ID 更新指定字段
+func (r *RepositoryImpl[T]) UpdateByID(ctx context.Context, id string, updates map[string]any, allowedFields ...string) error {
+	if len(updates) == 0 {
+		return errors.ErrInvalidArgument
+	}
+
+	// 过滤非法字段，防止注入/批量赋值漏洞
+	filteredUpdates, err := r.filterUpdates(updates, allowedFields)
+	if err != nil {
+		return err
+	}
+
+	if len(filteredUpdates) == 0 {
+		return errors.ErrInvalidArgument
+	}
+
+	model := r.newModelPtr()
+	result := r.applyTenantScope(ctx, r.withContext(ctx)).Model(model).Where("id = ?", id).Updates(filteredUpdates)
+	if result.Error != nil {
+		return normalizeRepositoryError(result.Error, "failed to update record")
+	}
+
+	if result.RowsAffected == 0 {
+		return normalizeRepositoryError(gorm.ErrRecordNotFound, "record not found")
+	}
+
+	return nil
+}
+
+// filterUpdates 过滤掉 map 中非法的数据库列名，防止字段注入/批量赋值漏洞
+func (r *RepositoryImpl[T]) filterUpdates(updates map[string]any, allowedFields []string) (map[string]any, error) {
+	if r.strictUpdates && len(allowedFields) == 0 {
+		return nil, fmt.Errorf("strict update mode requires explicit allowedFields whitelist")
+	}
+
+	// 使用缓存的 Schema
+	schema, err := r.getSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	// 构建白名单 Set
+	allowedSet := make(map[string]struct{})
+	for _, f := range allowedFields {
+		allowedSet[f] = struct{}{}
+	}
+	hasWhitelist := len(allowedSet) > 0
+
+	filtered := make(map[string]any)
+	for k, v := range updates {
+		// 如果有白名单，检查字段是否在白名单中
+		if hasWhitelist {
+			if _, ok := allowedSet[k]; !ok {
+				if r.strictUpdates {
+					return nil, fmt.Errorf("field %q is not in the allowed update fields whitelist", k)
+				}
+				r.db.Logger.Warn(context.Background(), "filterUpdates: field %q not in allowedFields whitelist, skipping", k)
+				continue
+			}
+		}
+
+		// 优先匹配数据库列名 (DB Name)
+		if field, ok := schema.FieldsByDBName[k]; ok {
+			if field.DBName == tenantColumn || field.DBName == deptColumn {
+				continue
+			}
+			if !field.PrimaryKey && field.Updatable {
+				filtered[k] = v
+			}
+			continue
+		}
+		// 尝试匹配结构体字段名 (Struct Field Name)
+		if field, ok := schema.FieldsByName[k]; ok {
+			if field.DBName == tenantColumn || field.DBName == deptColumn {
+				continue
+			}
+			if !field.PrimaryKey && field.Updatable {
+				filtered[field.DBName] = v
+			}
+			continue
+		}
+		// 字段在 Schema 中不存在
+		if r.strictUpdates {
+			return nil, fmt.Errorf("field %q not found in model schema", k)
+		}
+		r.db.Logger.Warn(context.Background(), "filterUpdates: field %q not found in schema, skipping", k)
+	}
+
+	return filtered, nil
+}
+
+// UpsertBatch 批量更新或插入记录
+// 注意：此方法使用 Upsert 语义（如果记录不存在则插入，存在则更新可更新字段）。
+// 对应 MySQL: INSERT ... ON DUPLICATE KEY UPDATE
+// 对应 Postgres: INSERT ... ON CONFLICT DO UPDATE
+func (r *RepositoryImpl[T]) UpsertBatch(ctx context.Context, models []*T) error {
+	if len(models) == 0 {
+		return errors.ErrInvalidArgument
+	}
+
+	// 过滤 nil 模型
+	validModels := make([]*T, 0, len(models))
+	for _, m := range models {
+		if m != nil {
+			validModels = append(validModels, m)
+		}
+	}
+
+	if len(validModels) == 0 {
+		return nil
+	}
+
+	for _, m := range validModels {
+		if err := r.setTenantFields(ctx, m); err != nil {
+			return err
+		}
+	}
+
+	updateColumns, err := r.upsertUpdateColumns()
+	if err != nil {
+		return err
+	}
+	onConflict := clause.OnConflict{}
+	if len(updateColumns) == 0 {
+		onConflict.DoNothing = true
+	} else {
+		onConflict.DoUpdates = clause.AssignmentColumns(updateColumns)
+	}
+
+	// 使用 Upsert 实现高效批量更新（Create + OnConflict 避免 Save 的 N+1 查询）
+	return normalizeRepositoryError(r.withContext(ctx).Clauses(onConflict).Create(validModels).Error, "failed to upsert records")
+}
+
+func (r *RepositoryImpl[T]) upsertUpdateColumns() ([]string, error) {
+	schema, err := r.getSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	columns := make([]string, 0, len(schema.Fields))
+	for _, field := range schema.Fields {
+		if field.DBName == "" {
+			continue
+		}
+		if field.PrimaryKey || !field.Updatable {
+			continue
+		}
+		if field.AutoCreateTime > 0 {
+			continue
+		}
+		if field.DBName == tenantColumn || field.DBName == deptColumn {
+			continue
+		}
+		columns = append(columns, field.DBName)
+	}
+
+	return columns, nil
+}
+
+/* ========================================================================
+ * Delete 操作
+ * ======================================================================== */
+
+// Delete 软删除记录（设置 deleted_at）
+func (r *RepositoryImpl[T]) Delete(ctx context.Context, id string) error {
+	model := r.newModelPtr()
+	result := r.applyTenantScope(ctx, r.withContext(ctx)).Delete(model, "id = ?", id)
+	if result.Error != nil {
+		return normalizeRepositoryError(result.Error, "failed to delete record")
+	}
+
+	if result.RowsAffected == 0 {
+		return normalizeRepositoryError(gorm.ErrRecordNotFound, "record not found")
+	}
+
+	return nil
+}
+
+// DeleteBatch 批量软删除记录
+func (r *RepositoryImpl[T]) DeleteBatch(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return errors.ErrInvalidArgument
+	}
+
+	model := r.newModelPtr()
+	result := r.applyTenantScope(ctx, r.withContext(ctx)).Delete(model, "id IN ?", ids)
+	if result.Error != nil {
+		return normalizeRepositoryError(result.Error, "failed to delete records")
+	}
+	if result.RowsAffected == 0 {
+		return normalizeRepositoryError(gorm.ErrRecordNotFound, "record not found")
+	}
+	return nil
+}
+
+// HardDelete 硬删除记录（从数据库移除）
+func (r *RepositoryImpl[T]) HardDelete(ctx context.Context, id string) error {
+	model := r.newModelPtr()
+	result := r.applyTenantScope(ctx, r.withContext(ctx)).Unscoped().Delete(model, "id = ?", id)
+	if result.Error != nil {
+		return normalizeRepositoryError(result.Error, "failed to hard delete record")
+	}
+
+	if result.RowsAffected == 0 {
+		return normalizeRepositoryError(gorm.ErrRecordNotFound, "record not found")
+	}
+
+	return nil
+}
+
+func (r *RepositoryImpl[T]) ensurePrimaryKeySet(ctx context.Context, model any) error {
+	schema, err := r.getSchema()
+	if err != nil {
+		return err
+	}
+
+	if schema.PrioritizedPrimaryField == nil {
+		return errors.ErrInvalidArgument
+	}
+
+	_, zero := schema.PrioritizedPrimaryField.ValueOf(ctx, reflect.ValueOf(model))
+	if zero {
+		return errors.ErrInvalidArgument
+	}
+
+	return nil
+}
