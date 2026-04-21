@@ -3,12 +3,14 @@ package idempotency
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/aisgo/ais-pkg/cache/redis"
+	"github.com/aisgo/ais-pkg/logger"
+
+	"go.uber.org/zap"
 )
 
 /* ========================================================================
@@ -64,6 +66,7 @@ type Checker struct {
 	keyPrefix   string
 	ttl         time.Duration
 	mode        string
+	log         *logger.Logger
 }
 
 // Config 幂等性配置
@@ -78,10 +81,17 @@ type Config struct {
 	// EnvModeKey 自定义环境变量名（可选）
 	// 如 "MYAPP_IDEMPOTENCY_MODE"，留空时使用 "IDEMPOTENCY_MODE"
 	EnvModeKey string
+	// Logger 结构化日志组件，留空时使用 no-op logger
+	Logger *logger.Logger
 }
 
 // New 创建幂等性检查器
 func New(client *redis.Client, cfg Config) *Checker {
+	log := cfg.Logger
+	if log == nil {
+		log = logger.NewNop()
+	}
+
 	// 确定运行模式
 	mode := cfg.Mode
 	if mode == "" {
@@ -106,6 +116,7 @@ func New(client *redis.Client, cfg Config) *Checker {
 		keyPrefix:   cfg.KeyPrefix,
 		ttl:         ttl,
 		mode:        mode,
+		log:         log,
 	}
 }
 
@@ -155,7 +166,10 @@ func (c *Checker) Check(ctx context.Context, key string) (bool, error) {
 		}
 		// best_effort 模式：Redis 异常时降级，假定未处理（允许继续）
 		// 记录 warn 日志以便运维感知 Redis 故障，但不阻断业务流程
-		log.Printf("WARN: idempotency check degraded (best_effort): %v", err)
+		c.log.Warn("idempotency check degraded",
+			zap.String("mode", c.mode),
+			zap.Error(err),
+		)
 		return false, nil
 	}
 
@@ -205,7 +219,10 @@ func (c *Checker) CheckAndMark(ctx context.Context, key string) (bool, error) {
 		}
 		// best_effort 模式：Redis 异常时降级，假定未处理（允许继续）
 		// 记录 warn 日志以便运维感知 Redis 故障，但不阻断业务流程
-		log.Printf("WARN: idempotency check-and-mark degraded (best_effort): %v", err)
+		c.log.Warn("idempotency check-and-mark degraded",
+			zap.String("mode", c.mode),
+			zap.Error(err),
+		)
 		return false, nil
 	}
 

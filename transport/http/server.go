@@ -37,6 +37,7 @@ type Config struct {
 	WriteTimeout       time.Duration `yaml:"write_timeout"`
 	IdleTimeout        time.Duration `yaml:"idle_timeout"`
 	HealthCheckTimeout time.Duration `yaml:"health_check_timeout"`
+	ExposeRuntimeStats bool          `yaml:"expose_runtime_stats"` // 是否在 /readyz 暴露内存和 goroutine 统计，默认 false
 
 	// EnableRecover 是否启用 Panic 恢复中间件，默认 true（生产环境推荐）
 	// 设为 false 可在开发/测试环境直接暴露 panic，便于问题定位
@@ -206,7 +207,7 @@ func NewHTTPServer(p ServerParams) *fiber.App {
 	if healthCheckTimeout <= 0 {
 		healthCheckTimeout = 2 * time.Second
 	}
-	registerHealthEndpoints(app, p.DB, healthCheckTimeout, p.Logger)
+	registerHealthEndpoints(app, p.DB, healthCheckTimeout, p.Config.ExposeRuntimeStats, p.Logger)
 
 	// 注册 Prometheus 指标端点
 	metrics.RegisterMetricsEndpoint(app)
@@ -456,7 +457,7 @@ func validatePreforkNetwork(network string) error {
  *   - 需要检查数据库等依赖是否就绪
  * ======================================================================== */
 
-func registerHealthEndpoints(app *fiber.App, db *gorm.DB, timeout time.Duration, log *logger.Logger) {
+func registerHealthEndpoints(app *fiber.App, db *gorm.DB, timeout time.Duration, includeRuntimeStats bool, log *logger.Logger) {
 	// 存活探针 - 简单返回 OK
 	app.Get("/healthz", func(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{
@@ -497,11 +498,12 @@ func registerHealthEndpoints(app *fiber.App, db *gorm.DB, timeout time.Duration,
 			}
 		}
 
-		// 内存使用情况
-		var m runtime.MemStats
-		runtime.ReadMemStats(&m)
-		checks["memory_alloc_mb"] = fmt.Sprintf("%.2f", float64(m.Alloc)/1024/1024)
-		checks["goroutines"] = fmt.Sprintf("%d", runtime.NumGoroutine())
+		if includeRuntimeStats {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			checks["memory_alloc_mb"] = fmt.Sprintf("%.2f", float64(m.Alloc)/1024/1024)
+			checks["goroutines"] = fmt.Sprintf("%d", runtime.NumGoroutine())
+		}
 
 		status := "ok"
 		statusCode := fiber.StatusOK

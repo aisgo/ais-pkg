@@ -227,7 +227,12 @@ func (r *RepositoryImpl[T]) UpdateByID(ctx context.Context, id string, updates m
 	}
 
 	model := r.newModelPtr()
-	result := r.applyTenantScope(ctx, r.withContext(ctx)).Model(model).Where("id = ?", id).Updates(filteredUpdates)
+	normalizedID, err := r.normalizePrimaryID(id)
+	if err != nil {
+		return normalizeRepositoryError(err, "invalid record id")
+	}
+
+	result := r.applyTenantScope(ctx, r.withContext(ctx)).Model(model).Where("id = ?", normalizedID).Updates(filteredUpdates)
 	if result.Error != nil {
 		return normalizeRepositoryError(result.Error, "failed to update record")
 	}
@@ -376,7 +381,12 @@ func (r *RepositoryImpl[T]) upsertUpdateColumns() ([]string, error) {
 // Delete 软删除记录（设置 deleted_at）
 func (r *RepositoryImpl[T]) Delete(ctx context.Context, id string) error {
 	model := r.newModelPtr()
-	result := r.applyTenantScope(ctx, r.withContext(ctx)).Delete(model, "id = ?", id)
+	normalizedID, err := r.normalizePrimaryID(id)
+	if err != nil {
+		return normalizeRepositoryError(err, "invalid record id")
+	}
+
+	result := r.applyTenantScope(ctx, r.withContext(ctx)).Delete(model, "id = ?", normalizedID)
 	if result.Error != nil {
 		return normalizeRepositoryError(result.Error, "failed to delete record")
 	}
@@ -395,7 +405,12 @@ func (r *RepositoryImpl[T]) DeleteBatch(ctx context.Context, ids []string) error
 	}
 
 	model := r.newModelPtr()
-	result := r.applyTenantScope(ctx, r.withContext(ctx)).Delete(model, "id IN ?", ids)
+	normalizedIDs, err := r.normalizePrimaryIDs(ids)
+	if err != nil {
+		return normalizeRepositoryError(err, "invalid record ids")
+	}
+
+	result := r.applyTenantScope(ctx, r.withContext(ctx)).Delete(model, "id IN ?", normalizedIDs)
 	if result.Error != nil {
 		return normalizeRepositoryError(result.Error, "failed to delete records")
 	}
@@ -408,7 +423,12 @@ func (r *RepositoryImpl[T]) DeleteBatch(ctx context.Context, ids []string) error
 // HardDelete 硬删除记录（从数据库移除）
 func (r *RepositoryImpl[T]) HardDelete(ctx context.Context, id string) error {
 	model := r.newModelPtr()
-	result := r.applyTenantScope(ctx, r.withContext(ctx)).Unscoped().Delete(model, "id = ?", id)
+	normalizedID, err := r.normalizePrimaryID(id)
+	if err != nil {
+		return normalizeRepositoryError(err, "invalid record id")
+	}
+
+	result := r.applyTenantScope(ctx, r.withContext(ctx)).Unscoped().Delete(model, "id = ?", normalizedID)
 	if result.Error != nil {
 		return normalizeRepositoryError(result.Error, "failed to hard delete record")
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,31 @@ type hookRecorder struct {
 
 func (r *hookRecorder) Append(h fx.Hook) {
 	r.hooks = append(r.hooks, h)
+}
+
+type blockingListener struct {
+	closeOnce sync.Once
+	closeCh   chan struct{}
+}
+
+func newBlockingListener() *blockingListener {
+	return &blockingListener{closeCh: make(chan struct{})}
+}
+
+func (l *blockingListener) Accept() (net.Conn, error) {
+	<-l.closeCh
+	return nil, net.ErrClosed
+}
+
+func (l *blockingListener) Close() error {
+	l.closeOnce.Do(func() {
+		close(l.closeCh)
+	})
+	return nil
+}
+
+func (l *blockingListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0}
 }
 
 func TestRecoveryInterceptor(t *testing.T) {
@@ -183,5 +209,59 @@ func TestNewServerOnStartReturnsEarlyServeFailure(t *testing.T) {
 
 	if err := lc.hooks[0].OnStart(ctx); err == nil {
 		t.Fatalf("expected serve failure to be returned from OnStart")
+	}
+}
+
+func TestNewServerOnStartStopsServerWhenStartupContextCanceled(t *testing.T) {
+	listener := newBlockingListener()
+	lc := &hookRecorder{}
+	_ = NewServer(ServerParams{
+		Lc:       lc,
+		Config:   Config{Mode: "microservice", StartupGracePeriod: time.Second},
+		Listener: listener,
+		Logger:   logger.NewNop(),
+	})
+
+	if len(lc.hooks) != 1 || lc.hooks[0].OnStart == nil {
+		t.Fatalf("expected lifecycle hook to be registered")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := lc.hooks[0].OnStart(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got: %v", err)
+	}
+
+	select {
+	case <-listener.closeCh:
+	case <-time.After(time.Second):
+		t.Fatalf("expected listener to be closed on startup cancellation")
+	}
+}
+
+func TestNewServerOnStartReturnsWhenAcceptLoopBegins(t *testing.T) {
+	listener := newBlockingListener()
+	lc := &hookRecorder{}
+	_ = NewServer(ServerParams{
+		Lc:       lc,
+		Config:   Config{Mode: "microservice"},
+		Listener: listener,
+		Logger:   logger.NewNop(),
+	})
+
+	if len(lc.hooks) != 1 || lc.hooks[0].OnStart == nil || lc.hooks[0].OnStop == nil {
+		t.Fatalf("expected lifecycle hooks to be registered")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := lc.hooks[0].OnStart(ctx); err != nil {
+		t.Fatalf("expected startup to succeed once accept loop begins, got %v", err)
+	}
+	if err := lc.hooks[0].OnStop(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
 	}
 }

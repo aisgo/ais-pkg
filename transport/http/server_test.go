@@ -48,7 +48,7 @@ func TestBuildListenConfigOverrides(t *testing.T) {
 
 func TestHealthEndpoints(t *testing.T) {
 	app := fiber.New()
-	registerHealthEndpoints(app, nil, 2*time.Second, logger.NewNop())
+	registerHealthEndpoints(app, nil, 2*time.Second, false, logger.NewNop())
 
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	resp, err := app.Test(req, fiber.TestConfig{Timeout: 2 * time.Second})
@@ -76,6 +76,44 @@ func TestHealthEndpoints(t *testing.T) {
 	}
 	if body["status"] != "ok" {
 		t.Fatalf("unexpected status body: %v", body["status"])
+	}
+
+	checks, ok := body["checks"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected checks object, got: %#v", body["checks"])
+	}
+	if _, exists := checks["memory_alloc_mb"]; exists {
+		t.Fatalf("expected runtime stats to be hidden by default")
+	}
+	if _, exists := checks["goroutines"]; exists {
+		t.Fatalf("expected goroutine count to be hidden by default")
+	}
+}
+
+func TestHealthEndpointsCanExposeRuntimeStats(t *testing.T) {
+	app := fiber.New()
+	registerHealthEndpoints(app, nil, 2*time.Second, true, logger.NewNop())
+
+	req := httptest.NewRequest("GET", "/readyz", nil)
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	checks, ok := body["checks"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected checks object, got: %#v", body["checks"])
+	}
+	if _, exists := checks["memory_alloc_mb"]; !exists {
+		t.Fatalf("expected runtime stats to be present when enabled")
+	}
+	if _, exists := checks["goroutines"]; !exists {
+		t.Fatalf("expected goroutine count to be present when enabled")
 	}
 }
 

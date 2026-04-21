@@ -2,7 +2,10 @@ package repository
 
 import (
 	"context"
+	"reflect"
 
+	pkgerrors "github.com/aisgo/ais-pkg/errors"
+	"github.com/aisgo/ais-pkg/ulid"
 	"gorm.io/gorm"
 )
 
@@ -51,6 +54,43 @@ func (r *RepositoryImpl[T]) buildQuery(ctx context.Context, opts *QueryOption) *
 	return db
 }
 
+func isULIDPrimaryKeyType(fieldType reflect.Type) bool {
+	return fieldType.PkgPath() == "github.com/aisgo/ais-pkg/ulid" && fieldType.Name() == "ID"
+}
+
+func (r *RepositoryImpl[T]) normalizePrimaryID(id string) (any, error) {
+	schema, err := r.getSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	if schema == nil || schema.PrioritizedPrimaryField == nil {
+		return id, nil
+	}
+
+	if isULIDPrimaryKeyType(schema.PrioritizedPrimaryField.FieldType) {
+		parsedID, err := ulid.ParseID(id)
+		if err != nil {
+			return nil, pkgerrors.Wrap(pkgerrors.ErrCodeInvalidArgument, "invalid record id", err)
+		}
+		return parsedID, nil
+	}
+
+	return id, nil
+}
+
+func (r *RepositoryImpl[T]) normalizePrimaryIDs(ids []string) ([]any, error) {
+	normalized := make([]any, 0, len(ids))
+	for _, id := range ids {
+		value, err := r.normalizePrimaryID(id)
+		if err != nil {
+			return nil, err
+		}
+		normalized = append(normalized, value)
+	}
+	return normalized, nil
+}
+
 /* ========================================================================
  * FindByID 操作
  * ======================================================================== */
@@ -59,9 +99,13 @@ func (r *RepositoryImpl[T]) buildQuery(ctx context.Context, opts *QueryOption) *
 func (r *RepositoryImpl[T]) FindByID(ctx context.Context, id string, opts ...Option) (*T, error) {
 	opt := ApplyOptions(opts)
 	model := r.newModelPtr()
+	normalizedID, err := r.normalizePrimaryID(id)
+	if err != nil {
+		return nil, normalizeRepositoryError(err, "invalid record id")
+	}
 
 	query := r.buildQuery(ctx, opt)
-	if err := query.Where("id = ?", id).First(model).Error; err != nil {
+	if err := query.Where("id = ?", normalizedID).First(model).Error; err != nil {
 		return nil, normalizeRepositoryError(err, "failed to find record")
 	}
 
@@ -76,9 +120,13 @@ func (r *RepositoryImpl[T]) FindByIDs(ctx context.Context, ids []string, opts ..
 
 	opt := ApplyOptions(opts)
 	var models []*T
+	normalizedIDs, err := r.normalizePrimaryIDs(ids)
+	if err != nil {
+		return nil, normalizeRepositoryError(err, "invalid record ids")
+	}
 
 	query := r.buildQuery(ctx, opt)
-	if err := query.Where("id IN ?", ids).Find(&models).Error; err != nil {
+	if err := query.Where("id IN ?", normalizedIDs).Find(&models).Error; err != nil {
 		return nil, normalizeRepositoryError(err, "failed to find records")
 	}
 

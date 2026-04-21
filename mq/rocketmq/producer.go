@@ -29,6 +29,9 @@ func NewProducer(cfg *Config, logger *zap.Logger) (*Producer, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	if cfg == nil {
+		return nil, fmt.Errorf("rocketmq config is required")
+	}
 
 	// 构建 NameServer 地址
 	nameServers := make([]string, len(cfg.NameServers))
