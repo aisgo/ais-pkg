@@ -25,6 +25,11 @@ const (
 	defaultRetryBaseDelay = 100 * time.Millisecond // 默认重试基础延迟
 )
 
+var (
+	consumerStartTimeout = 30 * time.Second
+	consumerStopTimeout  = 5 * time.Second
+)
+
 // =============================================================================
 // 注册工厂
 // =============================================================================
@@ -48,8 +53,8 @@ type ConsumerAdapter struct {
 	wg        sync.WaitGroup
 	mu        sync.RWMutex
 	ready     chan struct{} // 就绪信号 channel，每次 Start 时重新创建
-	readyMu   sync.Mutex  // 保护 readyDone 与 ready channel 的关闭操作
-	readyDone bool        // 标记 ready channel 是否已关闭，避免重复关闭
+	readyMu   sync.Mutex    // 保护 readyDone 与 ready channel 的关闭操作
+	readyDone bool          // 标记 ready channel 是否已关闭，避免重复关闭
 }
 
 // NewConsumerAdapter 创建 Kafka 消费者适配器
@@ -214,20 +219,46 @@ func (c *ConsumerAdapter) Start() error {
 	}()
 
 	// 等待消费者准备就绪
+	startTimer := time.NewTimer(consumerStartTimeout)
+	defer startTimer.Stop()
+
 	select {
 	case <-readyCh:
 		c.logger.Info("Kafka consumer started", zap.Strings("topics", topics))
 		return nil
 	case err := <-startErr:
-		cancel()
-		c.wg.Wait()
-		_ = c.client.Close()
+		c.abortStart(cancel)
 		return err
-	case <-time.After(30 * time.Second):
-		cancel()
-		c.wg.Wait()
-		_ = c.client.Close()
+	case <-startTimer.C:
+		c.abortStart(cancel)
 		return fmt.Errorf("kafka consumer start timeout")
+	}
+}
+
+func (c *ConsumerAdapter) abortStart(cancel context.CancelFunc) {
+	cancel()
+
+	c.mu.Lock()
+	c.cancel = nil
+	c.mu.Unlock()
+
+	if err := c.client.Close(); err != nil {
+		c.logger.Warn("failed to close consumer after startup failure", zap.Error(err))
+	}
+
+	waitDone := make(chan struct{})
+	go func() {
+		c.wg.Wait()
+		close(waitDone)
+	}()
+
+	stopTimer := time.NewTimer(consumerStopTimeout)
+	defer stopTimer.Stop()
+
+	select {
+	case <-waitDone:
+	case <-stopTimer.C:
+		c.logger.Warn("timed out waiting for consumer goroutine to exit after startup failure")
 	}
 }
 

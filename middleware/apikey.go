@@ -3,6 +3,7 @@ package middleware
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"sort"
 
 	"github.com/aisgo/ais-pkg/logger"
 
@@ -45,12 +46,17 @@ type APIKeyConfig struct {
 
 // APIKeyAuth API Key 认证中间件
 type APIKeyAuth struct {
-	config    *APIKeyConfig
-	keyHashes map[string][32]byte // key_id -> api_key_hash (内存中存储散列)
-	log       *logger.Logger
+	config     *APIKeyConfig
+	keyEntries []apiKeyHashEntry
+	log        *logger.Logger
 }
 
 const apiKeyIDLocalKey = "key_id"
+
+type apiKeyHashEntry struct {
+	keyID string
+	hash  [32]byte
+}
 
 // NewAPIKeyAuth 创建 API Key 认证中间件
 // 注意: API Key 会被转换为 SHA256 散列后存储，原始值不会保留在内存中
@@ -62,16 +68,25 @@ func NewAPIKeyAuth(cfg *APIKeyConfig, log *logger.Logger) *APIKeyAuth {
 		log = logger.NewNop()
 	}
 
-	// 将 API Key 转换为 SHA256 散列
-	keyHashes := make(map[string][32]byte, len(cfg.Keys))
-	for keyID, apiKey := range cfg.Keys {
-		keyHashes[keyID] = sha256.Sum256([]byte(apiKey))
+	// 将 API Key 转换为 SHA256 散列，并固定遍历顺序。
+	keyIDs := make([]string, 0, len(cfg.Keys))
+	for keyID := range cfg.Keys {
+		keyIDs = append(keyIDs, keyID)
+	}
+	sort.Strings(keyIDs)
+
+	keyEntries := make([]apiKeyHashEntry, 0, len(keyIDs))
+	for _, keyID := range keyIDs {
+		keyEntries = append(keyEntries, apiKeyHashEntry{
+			keyID: keyID,
+			hash:  sha256.Sum256([]byte(cfg.Keys[keyID])),
+		})
 	}
 
 	return &APIKeyAuth{
-		config:    cfg,
-		keyHashes: keyHashes,
-		log:       log,
+		config:     cfg,
+		keyEntries: keyEntries,
+		log:        log,
 	}
 }
 
@@ -141,16 +156,20 @@ func (a *APIKeyAuth) Authenticate() fiber.Handler {
 // validateAPIKey 验证 API Key
 // 使用 SHA256 散列 + constant-time 比较防止时序攻击
 func (a *APIKeyAuth) validateAPIKey(apiKey string) (string, bool) {
-	// 计算提供的 API Key 的散列
 	providedHash := sha256.Sum256([]byte(apiKey))
+	matchedKeyID := ""
+	matched := 0
 
-	// 遍历所有存储的散列进行 constant-time 比较
-	for keyID, storedHash := range a.keyHashes {
-		if subtle.ConstantTimeCompare(providedHash[:], storedHash[:]) == 1 {
-			return keyID, true
+	// 必须完整遍历所有已配置的 key，避免首个命中后提前返回形成可观测时序差异。
+	for _, entry := range a.keyEntries {
+		equal := subtle.ConstantTimeCompare(providedHash[:], entry.hash[:])
+		if equal == 1 && matched == 0 {
+			matchedKeyID = entry.keyID
 		}
+		matched |= equal
 	}
-	return "", false
+
+	return matchedKeyID, matched == 1
 }
 
 // maskAPIKey 脱敏 API Key 用于日志记录

@@ -148,18 +148,29 @@ func (p *ProducerAdapter) handleAsyncErrors() {
 }
 
 // deliverSyncSendResult 将异步结果投递到同步 channel，返回是否投递成功。
-// 使用单个 select 同时监听 ctx 取消和 channel 投递，消除 TOCTOU 竞态。
+// 结果通道只允许非阻塞投递，避免迟到结果把后台 goroutine 永久卡住。
 func (p *ProducerAdapter) deliverSyncSendResult(metadata any, result syncSendResult) bool {
 	m, ok := metadata.(syncSendMetadata)
 	if !ok {
 		return false
 	}
 	if m.ctx != nil {
-		// 同时监听 ctx 取消与 channel 投递，避免先检查 ctx 再写入之间的竞态窗口
+		// 已取消的同步请求不再接收结果，避免迟到回调写入已经放弃等待的接收方。
+		select {
+		case <-m.ctx.Done():
+			return false
+		default:
+		}
+
+		// 同时监听 ctx 取消与 channel 投递，并在接收方不可用时立即丢弃结果，
+		// 避免 channel 已满时永久阻塞。
 		select {
 		case m.ch <- result:
 			return true
 		case <-m.ctx.Done():
+			return false
+		default:
+			p.logger.Warn("dropping sync send result because receiver is unavailable")
 			return false
 		}
 	}

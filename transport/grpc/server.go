@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -42,7 +43,7 @@ type Config struct {
 	MaxSendMsgSize       int           `yaml:"max_send_msg_size"`        // 服务端最大发送消息字节数，默认 16MB
 	ClientMaxRecvMsgSize int           `yaml:"client_max_recv_msg_size"` // 客户端最大接收消息字节数，默认继承 MaxRecvMsgSize 或 16MB
 	ClientMaxSendMsgSize int           `yaml:"client_max_send_msg_size"` // 客户端最大发送消息字节数，默认继承 MaxSendMsgSize 或 16MB
-	StartupGracePeriod   time.Duration `yaml:"startup_grace_period"`     // 启动观察窗口（等待 Serve 早期失败），默认 25ms；容器/高负载环境可适当调大
+	StartupGracePeriod   time.Duration `yaml:"startup_grace_period"`     // Deprecated: gRPC 启动改为等待进入 Accept 循环，此字段已忽略
 }
 
 // TLSConfig gRPC 客户端 TLS 配置
@@ -89,6 +90,36 @@ type ServerParams struct {
 	Logger   *logger.Logger
 }
 
+type startupProbeListener struct {
+	net.Listener
+	acceptStarted chan struct{}
+	acceptErr     chan error
+	once          sync.Once
+}
+
+func newStartupProbeListener(listener net.Listener) *startupProbeListener {
+	return &startupProbeListener{
+		Listener:      listener,
+		acceptStarted: make(chan struct{}),
+		acceptErr:     make(chan error, 1),
+	}
+}
+
+func (l *startupProbeListener) Accept() (net.Conn, error) {
+	l.once.Do(func() {
+		close(l.acceptStarted)
+	})
+
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		select {
+		case l.acceptErr <- err:
+		default:
+		}
+	}
+	return conn, err
+}
+
 // recoveryInterceptor 创建 panic 恢复拦截器
 func recoveryInterceptor(log *logger.Logger) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
@@ -132,7 +163,6 @@ func loggingInterceptor(log *logger.Logger) grpc.UnaryServerInterceptor {
 }
 
 const defaultMsgSize = 16 * 1024 * 1024 // 16MB
-const serverStartupGracePeriod = 25 * time.Millisecond
 
 func resolveServerMsgSizeLimits(cfg Config) (recv, send int) {
 	recv = cfg.MaxRecvMsgSize
@@ -195,14 +225,17 @@ func NewServer(p ServerParams) *grpc.Server {
 		grpc.MaxSendMsgSize(maxSendMsgSize),
 	}
 	s := grpc.NewServer(opts...)
+	probeListener := newStartupProbeListener(p.Listener)
 
 	p.Lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			errChan := make(chan error, 1)
+			serveDone := make(chan struct{})
 
 			go func() {
+				defer close(serveDone)
 				p.Logger.Info("Starting gRPC Server")
-				if err := s.Serve(p.Listener); err != nil {
+				if err := s.Serve(probeListener); err != nil {
 					p.Logger.Error("gRPC Server failed", zap.Error(err))
 					select {
 					case errChan <- err:
@@ -211,23 +244,22 @@ func NewServer(p ServerParams) *grpc.Server {
 				}
 			}()
 
-			// gRPC 没有对外暴露可靠的”开始接受连接”事件。
-			// 这里优先等待 Serve 的早期失败；短暂观察窗口后再宣告启动成功，
-			// 避免 Serve 立即返回错误时仍被 Fx 视为已启动。
-			// 观察窗口通过 Config.StartupGracePeriod 配置（容器/高负载环境可适当调大）。
-			gracePeriod := p.Config.StartupGracePeriod
-			if gracePeriod <= 0 {
-				gracePeriod = serverStartupGracePeriod
-			}
-			timer := time.NewTimer(gracePeriod)
-			defer timer.Stop()
-
 			select {
 			case err := <-errChan:
 				return err
-			case <-timer.C:
+			case <-probeListener.acceptStarted:
+				select {
+				case err := <-probeListener.acceptErr:
+					return err
+				case err := <-errChan:
+					return err
+				default:
+				}
 				return nil
 			case <-ctx.Done():
+				p.Logger.Warn("gRPC Server startup canceled, stopping server", zap.Error(ctx.Err()))
+				s.Stop()
+				<-serveDone
 				return ctx.Err()
 			}
 		},

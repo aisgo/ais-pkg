@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/aisgo/ais-pkg/logger"
@@ -64,8 +65,9 @@ type Clienter interface {
 
 // Client Redis 客户端封装
 type Client struct {
-	rdb *redis.Client
-	log *logger.Logger
+	rdb      *redis.Client
+	log      *logger.Logger
+	disabled atomic.Bool
 }
 
 var _ Clienter = (*Client)(nil)
@@ -118,7 +120,7 @@ func NewClient(p ClientParams) *Client {
 }
 
 // OptionalNewClient 创建 Redis 客户端（宽松模式）
-// 配置缺失或连接失败时返回 nil，不阻塞应用启动
+// 配置缺失时返回 nil；连接失败时在 OnStart 中禁用客户端，但不阻塞应用启动
 // 适用于 Redis 作为可选依赖的场景（如本地开发、缓存降级）
 func OptionalNewClient(p ClientParams) *Client {
 	if p.Logger == nil {
@@ -141,41 +143,46 @@ func OptionalNewClient(p ClientParams) *Client {
 		MinIdleConns: p.Config.MinIdleConns,
 	})
 
-	// 立即测试连接（在 Provide 阶段而不是 OnStart）
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		p.Logger.Warn("Redis client disabled: connection failed",
-			zap.String("addr", addr),
-			zap.Error(err),
-		)
-		_ = rdb.Close()
-		return nil
-	}
-
 	client := &Client{
 		rdb: rdb,
 		log: p.Logger,
 	}
 
 	p.Lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
+			if err := rdb.Ping(ctx).Err(); err != nil {
+				client.disabled.Store(true)
+				p.Logger.Warn("Redis client disabled: connection failed",
+					zap.String("addr", addr),
+					zap.Error(err),
+				)
+				_ = rdb.Close()
+				return nil
+			}
+
+			p.Logger.Info("Redis client initialized",
+				zap.String("addr", addr),
+				zap.Int("db", p.Config.DB),
+			)
+			return nil
+		},
 		OnStop: func(ctx context.Context) error {
+			if client.disabled.Load() {
+				return nil
+			}
 			p.Logger.Info("Closing Redis connection")
 			return rdb.Close()
 		},
 	})
-
-	p.Logger.Info("Redis client initialized",
-		zap.String("addr", addr),
-		zap.Int("db", p.Config.DB),
-	)
 
 	return client
 }
 
 // Raw 返回底层 Redis 客户端 (用于高级操作)
 func (c *Client) Raw() *redis.Client {
+	if c == nil || c.disabled.Load() {
+		return nil
+	}
 	return c.rdb
 }
 
@@ -248,5 +255,8 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // PoolStats 返回连接池统计信息，用于监控连接池健康状况
 func (c *Client) PoolStats() *redis.PoolStats {
+	if c == nil || c.disabled.Load() {
+		return nil
+	}
 	return c.rdb.PoolStats()
 }

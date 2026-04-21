@@ -26,6 +26,7 @@ http:
   read_timeout: 30s
   write_timeout: 30s
   idle_timeout: 120s
+  expose_runtime_stats: false  # 是否在 /readyz 暴露内存与 goroutine 统计，默认 false
   
   # ListenConfig 配置
   listen:
@@ -193,9 +194,7 @@ func main() {
 func NewListenConfigCustomizer(logger *logger.Logger) http.ListenConfigCustomizer {
     return func(cfg *fiber.ListenConfig) {
         // 设置优雅关闭的 context，超时 30 秒
-        ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-        defer cancel()
-        cfg.GracefulContext = ctx
+        cfg.GracefulContext = context.Background()
         
         // 在服务启动前执行一些初始化操作
         cfg.BeforeServeFunc = func(app *fiber.App) error {
@@ -255,9 +254,7 @@ func registerRoutes(app *fiber.App) {
   "status": "ok",
   "time": "2026-01-15T12:00:00+08:00",
   "checks": {
-    "database": "ok",
-    "memory_alloc_mb": "128.45",
-    "goroutines": "42"
+    "database": "ok"
   }
 }
 ```
@@ -268,9 +265,7 @@ func registerRoutes(app *fiber.App) {
   "status": "unhealthy",
   "time": "2026-01-15T12:00:00+08:00",
   "checks": {
-    "database": "error: connection refused",
-    "memory_alloc_mb": "256.78",
-    "goroutines": "89"
+    "database": "unhealthy"
   }
 }
 ```
@@ -287,6 +282,7 @@ func registerRoutes(app *fiber.App) {
 | `write_timeout` | `time.Duration` | `30s` | 写入超时时间 |
 | `idle_timeout` | `time.Duration` | `120s` | 空闲连接超时时间 |
 | `health_check_timeout` | `time.Duration` | `2s` | `/readyz` 数据库 Ping 超时 |
+| `expose_runtime_stats` | `bool` | `false` | 是否在 `/readyz` 暴露内存与 goroutine 统计 |
 
 ### ListenOptions 字段
 

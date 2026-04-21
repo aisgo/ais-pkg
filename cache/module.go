@@ -12,7 +12,7 @@ import (
  *
  * 模块选择:
  *   - Module: 严格模式，连接失败时阻塞启动
- *   - OptionalModule: 宽松模式，连接失败时返回 nil，不阻塞启动
+ *   - OptionalModule: 宽松模式，配置缺失时返回 nil；连接失败时禁用客户端，不阻塞启动
  * ======================================================================== */
 
 // Module 缓存模块（严格模式）
@@ -27,7 +27,7 @@ var Module = fx.Module("cache",
 
 // OptionalModule 缓存模块（宽松模式）
 // 提供: redis.Clienter, *redis.Client（可能为 nil）
-// 配置缺失或连接失败时返回 nil，不阻塞应用启动
+// 配置缺失时返回 nil；连接失败时禁用客户端，不阻塞应用启动
 var OptionalModule = fx.Module("cache-optional",
 	fx.Provide(
 		redis.OptionalNewClient,

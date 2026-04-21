@@ -82,13 +82,18 @@ func (r *RepositoryImpl[T]) findPageWithSnapshot(ctx context.Context, opt *Query
 		var err error
 		result, err = r.findPageWithDB(query, page, pageSize)
 		return err
-	}, &sql.TxOptions{
-		Isolation: sql.LevelRepeatableRead,
-	})
+	}, pageReadTxOptions())
 	if err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func pageReadTxOptions() *sql.TxOptions {
+	return &sql.TxOptions{
+		Isolation: sql.LevelReadCommitted,
+		ReadOnly:  true,
+	}
 }
 
 func (r *RepositoryImpl[T]) findPageWithDB(db *gorm.DB, page, pageSize int) (*PageResult[T], error) {

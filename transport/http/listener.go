@@ -2,8 +2,10 @@ package http
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
+	"os"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -29,27 +31,9 @@ func createListener(addr string, config fiber.ListenConfig) (net.Listener, error
 
 	// 如果启用了 TLS
 	if config.CertFile != "" && config.CertKeyFile != "" {
-		// 加载 TLS 证书
-		var cert tls.Certificate
-		cert, err = tls.LoadX509KeyPair(config.CertFile, config.CertKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
-		}
-
-		// 创建 TLS 配置
-		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
-		}
-
-		// 如果指定了最低 TLS 版本
-		if config.TLSMinVersion > 0 {
-			tlsConfig.MinVersion = config.TLSMinVersion
-		}
-
-		// 如果有客户端证书（mTLS）
-		if config.CertClientFile != "" {
-			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		tlsConfig, tlsErr := buildListenerTLSConfig(config)
+		if tlsErr != nil {
+			return nil, tlsErr
 		}
 
 		// 创建 TLS listener
@@ -64,4 +48,39 @@ func createListener(addr string, config fiber.ListenConfig) (net.Listener, error
 	}
 
 	return ln, nil
+}
+
+func buildListenerTLSConfig(config fiber.ListenConfig) (*tls.Config, error) {
+	// 加载 TLS 证书
+	cert, err := tls.LoadX509KeyPair(config.CertFile, config.CertKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
+	}
+
+	// 创建 TLS 配置
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+
+	// 如果指定了最低 TLS 版本
+	if config.TLSMinVersion > 0 {
+		tlsConfig.MinVersion = config.TLSMinVersion
+	}
+
+	// 如果有客户端证书（mTLS），则显式加载客户端 CA
+	if config.CertClientFile != "" {
+		clientCA, err := os.ReadFile(config.CertClientFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read client CA file: %w", err)
+		}
+		clientCAPool := x509.NewCertPool()
+		if ok := clientCAPool.AppendCertsFromPEM(clientCA); !ok {
+			return nil, fmt.Errorf("failed to append client CA certs from PEM")
+		}
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		tlsConfig.ClientCAs = clientCAPool
+	}
+
+	return tlsConfig, nil
 }

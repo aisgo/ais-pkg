@@ -2,6 +2,7 @@ package rocketmq
 
 import (
 	"context"
+	"fmt"
 
 	"go.uber.org/fx"
 	"go.uber.org/zap"
@@ -77,6 +78,9 @@ type ConsumerResult struct {
 // ProvideProducer 提供 Producer（严格模式）
 // 配置缺失或初始化失败时返回 error
 func ProvideProducer(lc fx.Lifecycle, params ProducerParams) (ProducerResult, error) {
+	if params.Config == nil {
+		return ProducerResult{}, fmt.Errorf("rocketmq config is required")
+	}
 	producer, err := NewProducer(params.Config, params.Logger)
 	if err != nil {
 		return ProducerResult{}, err
@@ -94,6 +98,9 @@ func ProvideProducer(lc fx.Lifecycle, params ProducerParams) (ProducerResult, er
 // ProvideConsumer 提供 Consumer（严格模式）
 // 配置缺失或初始化失败时返回 error
 func ProvideConsumer(lc fx.Lifecycle, params ConsumerParams) (ConsumerResult, error) {
+	if params.Config == nil {
+		return ConsumerResult{}, fmt.Errorf("rocketmq config is required")
+	}
 	consumer, err := NewConsumer(params.Config, params.Logger)
 	if err != nil {
 		return ConsumerResult{}, err

@@ -2,9 +2,22 @@ package redis
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
+
+	"github.com/aisgo/ais-pkg/logger"
+
+	"go.uber.org/fx"
 )
+
+type lifecycleRecorder struct {
+	hooks []fx.Hook
+}
+
+func (r *lifecycleRecorder) Append(h fx.Hook) {
+	r.hooks = append(r.hooks, h)
+}
 
 func TestClientCacheOps(t *testing.T) {
 	client, server := newTestClientWithServer(t)
@@ -68,5 +81,47 @@ func TestClientHashOps(t *testing.T) {
 
 	if err := client.HDel(ctx, "h1", "f1"); err != nil {
 		t.Fatalf("hdel: %v", err)
+	}
+}
+
+func TestOptionalNewClientDefersPingToOnStart(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+
+	lc := &lifecycleRecorder{}
+	client := OptionalNewClient(ClientParams{
+		Lc: lc,
+		Config: Config{
+			Host: "127.0.0.1",
+			Port: port,
+		},
+		Logger: logger.NewNop(),
+	})
+	if client == nil {
+		t.Fatalf("expected optional client to be constructed before OnStart")
+	}
+	if len(lc.hooks) != 1 || lc.hooks[0].OnStart == nil {
+		t.Fatalf("expected lifecycle hook to be registered")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := lc.hooks[0].OnStart(ctx); err != nil {
+		t.Fatalf("expected optional client startup to degrade without error, got %v", err)
+	}
+	if raw := client.Raw(); raw != nil {
+		t.Fatalf("expected disabled client to hide raw redis handle after ping failure")
+	}
+	if lc.hooks[0].OnStop != nil {
+		if err := lc.hooks[0].OnStop(ctx); err != nil {
+			t.Fatalf("stop: %v", err)
+		}
 	}
 }

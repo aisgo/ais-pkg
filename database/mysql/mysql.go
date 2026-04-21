@@ -25,31 +25,31 @@ import (
 
 // 默认连接池配置
 const (
-	DefaultMaxIdleConns       = 10
-	DefaultMaxOpenConns       = 25
-	DefaultConnMaxLifetime    = 1 * time.Hour
-	DefaultConnMaxIdleTime    = 20 * time.Minute
-	DefaultCharset            = "utf8mb4"
-	DefaultLoc                = "Local"
+	DefaultMaxIdleConns          = 10
+	DefaultMaxOpenConns          = 25
+	DefaultConnMaxLifetime       = 1 * time.Hour
+	DefaultConnMaxIdleTime       = 20 * time.Minute
+	DefaultCharset               = "utf8mb4"
+	DefaultLoc                   = "Local"
 	DefaultMaxOpenConnsHardLimit = 500 // 防止连接数过大耗尽系统文件描述符（容器环境尤其敏感）
 )
 
 // Config MySQL 配置
 type Config struct {
-	Host                 string        `yaml:"host"`
-	Port                 int           `yaml:"port"`
-	User                 string        `yaml:"user"`
-	Password             string        `yaml:"password"`
-	DBName               string        `yaml:"dbname"`
-	Charset              string        `yaml:"charset"`                // 字符集，默认 utf8mb4
-	ParseTime            bool          `yaml:"parse_time"`             // 是否解析时间类型，默认 true
-	DisableParseTime     bool          `yaml:"disable_parse_time"`     // 显式关闭 parseTime（bool 无法区分未设置/false）
-	Loc                  string        `yaml:"loc"`                    // 时区，默认 Local
-	MaxIdleConns         int           `yaml:"max_idle_conns"`         // 最大空闲连接数
-	MaxOpenConns         int           `yaml:"max_open_conns"`         // 最大打开连接数
-	ConnMaxLifetime      time.Duration `yaml:"conn_max_lifetime"`      // 连接最大生命周期
-	ConnMaxIdleTime      time.Duration `yaml:"conn_max_idle_time"`     // 空闲连接最大时间
-	MaxOpenConnsHardLimit int          `yaml:"max_open_conns_hard_limit"` // 最大连接数防护上限，0 表示使用默认值 500
+	Host                  string        `yaml:"host"`
+	Port                  int           `yaml:"port"`
+	User                  string        `yaml:"user"`
+	Password              string        `yaml:"password"`
+	DBName                string        `yaml:"dbname"`
+	Charset               string        `yaml:"charset"`                   // 字符集，默认 utf8mb4
+	ParseTime             bool          `yaml:"parse_time"`                // 是否解析时间类型，默认 true；显式关闭请使用 disable_parse_time
+	DisableParseTime      bool          `yaml:"disable_parse_time"`        // 显式关闭 parseTime（bool 无法区分未设置/false）
+	Loc                   string        `yaml:"loc"`                       // 时区，默认 Local
+	MaxIdleConns          int           `yaml:"max_idle_conns"`            // 最大空闲连接数
+	MaxOpenConns          int           `yaml:"max_open_conns"`            // 最大打开连接数
+	ConnMaxLifetime       time.Duration `yaml:"conn_max_lifetime"`         // 连接最大生命周期
+	ConnMaxIdleTime       time.Duration `yaml:"conn_max_idle_time"`        // 空闲连接最大时间
+	MaxOpenConnsHardLimit int           `yaml:"max_open_conns_hard_limit"` // 最大连接数防护上限，0 表示使用默认值 500
 }
 
 // Params 依赖注入参数
@@ -72,10 +72,7 @@ func NewDB(p Params) (*gorm.DB, error) {
 		charset = DefaultCharset
 	}
 
-	parseTime := true
-	if p.Config.DisableParseTime {
-		parseTime = false
-	}
+	parseTime := resolveParseTime(p.Config)
 
 	loc := p.Config.Loc
 	if loc == "" {
@@ -95,6 +92,7 @@ func NewDB(p Params) (*gorm.DB, error) {
 		},
 	}
 	dsn := driverCfg.FormatDSN()
+	log.Info("Connecting to MySQL", zap.String("dsn", sanitizeMySQLDSN(dsn)))
 
 	// 使用自定义的 ZapGormLogger
 	gormLog := database.NewZapGormLogger(log.Logger)
@@ -174,4 +172,25 @@ func NewDB(p Params) (*gorm.DB, error) {
 	})
 
 	return db, nil
+}
+
+// sanitizeMySQLDSN replaces the password in a MySQL DSN with "***" to prevent
+// credential leakage in logs. Uses the driver's own parser for correctness.
+func sanitizeMySQLDSN(dsn string) string {
+	cfg, err := mysqldriver.ParseDSN(dsn)
+	if err != nil {
+		return "[redacted]"
+	}
+	cfg.Passwd = "***"
+	return cfg.FormatDSN()
+}
+
+func resolveParseTime(cfg Config) bool {
+	if cfg.DisableParseTime {
+		return false
+	}
+	if cfg.ParseTime {
+		return true
+	}
+	return true
 }
